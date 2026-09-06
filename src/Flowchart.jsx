@@ -14,39 +14,47 @@ import ReactFlow, {
 import 'reactflow/dist/style.css';
 
 // ==========================================
-// 🎨 CUSTOM GLASSMORPHISM NODE
+// 🎨 CALM PALETTE STEP NODE
 // ==========================================
 const CustomStepNode = ({ data, selected }) => {
+  const isAccent = data.isFirst || data.isLast;
+
   return (
     <div
-      className={`relative group px-4 py-3 rounded-2xl w-[240px] transition-all duration-300 backdrop-blur-md ${
-        data.isFirst
-          ? 'bg-indigo-950/80 border-indigo-500 shadow-indigo-500/20'
-          : data.isLast
-          ? 'bg-teal-950/80 border-teal-500 shadow-teal-500/20'
-          : 'bg-slate-900/90 border-slate-700/80 shadow-slate-950/40'
-      } border shadow-xl hover:scale-105 hover:border-indigo-400 ${
-        selected ? 'ring-2 ring-indigo-400 ring-offset-2 ring-offset-slate-950' : ''
+      className={`relative group px-4 py-3 rounded-[14px] w-[240px] transition-all duration-[320ms] border shadow-nf bg-[var(--surface)] ${
+        isAccent
+          ? 'border-[var(--teal)]'
+          : 'border-[var(--border)]'
+      } hover:border-[var(--teal)] ${
+        selected ? 'ring-2 ring-[var(--teal)] ring-offset-2 ring-offset-[var(--bg)]' : ''
       }`}
     >
-      <Handle type="target" position={Position.Left} className="!bg-indigo-400 !w-3 !h-3 !-left-1.5" />
-      <Handle type="source" position={Position.Right} className="!bg-teal-400 !w-3 !h-3 !-right-1.5" />
+      <Handle
+        type="target"
+        position={Position.Left}
+        className="!bg-[var(--teal)] !w-2.5 !h-2.5 !-left-1.5 !border-0"
+      />
+      <Handle
+        type="source"
+        position={Position.Right}
+        className="!bg-[var(--gold)] !w-2.5 !h-2.5 !-right-1.5 !border-0"
+      />
 
       <div className="flex items-center justify-between mb-2">
-        <span className="w-7 h-7 rounded-lg bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-sm">
+        <span className="w-7 h-7 rounded-lg bg-[var(--teal-soft)] border border-[var(--border)] flex items-center justify-center text-sm text-[var(--teal)]">
           {data.icon || '⚡'}
         </span>
-        <span className="text-[10px] font-extrabold tracking-widest uppercase px-2 py-0.5 rounded-full bg-slate-800 text-indigo-400 border border-slate-700">
+        <span className="text-[10px] font-medium tracking-wider uppercase px-2 py-0.5 rounded-full bg-[var(--gold-soft)] text-[var(--gold)] font-mono">
           Step {data.step || '01'}
         </span>
       </div>
 
       <div className="space-y-1">
-        <h4 className="text-xs font-bold text-slate-100 line-clamp-1 group-hover:text-indigo-300 transition">
+        <h4 className="text-xs font-semibold font-[family-name:var(--font-display)] text-[var(--ink)] line-clamp-1 group-hover:text-[var(--teal)] transition-colors">
           {data.title}
         </h4>
         {data.detail && (
-          <p className="text-[11px] text-slate-400 font-normal leading-snug line-clamp-2">
+          <p className="text-[11px] text-[var(--muted)] font-normal leading-snug line-clamp-2">
             {data.detail}
           </p>
         )}
@@ -68,7 +76,6 @@ function FlowchartContent({ data }) {
   useEffect(() => {
     if (!data || data.length === 0) return;
 
-    // Multi-Row S-Curve Grid Layout
     const MAX_PER_ROW = 3;
     const X_GAP = 290;
     const Y_GAP = 140;
@@ -105,8 +112,8 @@ function FlowchartContent({ data }) {
         animated: true,
         type: 'smoothstep',
         style: {
-          stroke: i === data.length - 2 ? '#14b8a6' : '#6366f1',
-          strokeWidth: 2.5,
+          stroke: i === data.length - 2 ? '#E4A036' : '#2B6E6B',
+          strokeWidth: 2,
         },
       });
     }
@@ -125,7 +132,7 @@ function FlowchartContent({ data }) {
   );
 
   return (
-    <div className="w-full h-full min-h-[380px] rounded-2xl overflow-hidden relative">
+    <div className="w-full h-full min-h-[380px] rounded-[14px] overflow-hidden relative bg-[var(--surface)]">
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -134,14 +141,15 @@ function FlowchartContent({ data }) {
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
         fitView
+        proOptions={{ hideAttribution: true }}
       >
-        <Controls className="!bg-slate-900/90 !border-slate-800 !text-slate-200 !rounded-xl !shadow-2xl" />
+        <Controls className="!bg-[var(--surface)] !border-[var(--border)] !rounded-nf-sm !shadow-nf" />
         <MiniMap
-          nodeColor={(n) => (n.data?.isFirst ? '#6366f1' : n.data?.isLast ? '#14b8a6' : '#334155')}
-          maskColor="rgba(11, 15, 25, 0.85)"
-          className="!bg-slate-950 !border !border-slate-800 !rounded-2xl"
+          nodeColor={(n) => (n.data?.isFirst || n.data?.isLast ? '#2B6E6B' : '#EEF0E7')}
+          maskColor="rgba(245, 246, 240, 0.75)"
+          className="!bg-[var(--surface-2)] !border !border-[var(--border)] !rounded-[14px]"
         />
-        <Background color="#334155" gap={20} size={1} />
+        <Background color="#DFE3D6" gap={20} size={1} />
       </ReactFlow>
     </div>
   );

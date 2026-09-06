@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import Flowchart from './Flowchart';
 
 // Configure PDF.js Worker
@@ -159,28 +159,55 @@ const fetchOpenAIAnalysis = async (text, apiKey) => {
 // ==========================================
 // 🎨 ACCESSIBLE BIONIC FORMATTER (WCAG Compliant)
 // ==========================================
-// Uses stark typographic weight (Bold Black / Bold White) rather than visual purple noise.
 
-const renderBionicText = (text, isDark) => {
-  return text.split(' ').map((word, i) => {
-    const match = word.match(/^([a-zA-Z0-9]+)(.*)$/);
-    if (!match) return <span key={i}>{word} </span>;
-    
-    const [, coreWord, punctuation] = match;
-    const mid = Math.ceil(coreWord.length / 2);
-    const boldPart = coreWord.slice(0, mid);
-    const restPart = coreWord.slice(mid);
+const splitBionic = (word) => {
+  const match = word.match(/^([a-zA-Z0-9]+)(.*)$/);
+  if (!match) return { bold: '', rest: word };
+  const [, coreWord, punctuation] = match;
+  const mid = Math.ceil(coreWord.length / 2);
+  return { bold: coreWord.slice(0, mid), rest: coreWord.slice(mid) + punctuation };
+};
 
+const renderBionicText = (text) => {
+  return text.split(/\s+/).map((word, i) => {
+    const { bold, rest } = splitBionic(word);
+    if (!bold) return <span key={i}>{word} </span>;
     return (
       <span key={i}>
-        <strong className={`font-extrabold ${isDark ? 'text-white' : 'text-black'}`}>
-          {boldPart}
-        </strong>
-        <span className={isDark ? 'text-slate-200' : 'text-slate-800'}>{restPart}</span>
-        {punctuation}{' '}
+        <strong className="font-bold text-[var(--ink)]">{bold}</strong>
+        <span className="text-[var(--muted)]">{rest}</span>{' '}
       </span>
     );
   });
+};
+
+const cardShortTitle = (text, idx) => {
+  const words = text.replace(/[^a-zA-Z0-9\s]/g, '').split(/\s+/).filter(Boolean);
+  if (words.length === 0) return `Card ${idx + 1}`;
+  return words.slice(0, 3).join(' ').replace(/^\w/, (c) => c.toUpperCase());
+};
+
+const buildFlashcards = (page) => {
+  const cards = [];
+  (page.flowchart || []).forEach((n) => {
+    cards.push({
+      q: `What does “${n.title}” cover?`,
+      a: n.detail || 'Key concept from this slide.',
+    });
+  });
+  (page.summary || []).forEach((point, i) => {
+    cards.push({
+      q: `Executive takeaway ${i + 1}?`,
+      a: point,
+    });
+  });
+  if (page.eli5) {
+    cards.push({
+      q: 'Explain this slide simply (ELI5).',
+      a: page.eli5,
+    });
+  }
+  return cards.slice(0, 6);
 };
 
 // ==========================================
@@ -218,7 +245,6 @@ const INITIAL_DOC = {
 export default function App() {
   const [pages, setPages] = useState(INITIAL_DOC);
   const [currentPage, setCurrentPage] = useState(1);
-  const [showFlowchart, setShowFlowchart] = useState(true);
   const [isFlowchartFullscreen, setIsFlowchartFullscreen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   
@@ -226,18 +252,122 @@ export default function App() {
   const [apiKey, setApiKey] = useState("");
   const [useAI, setUseAI] = useState(false);
   const [isDyslexicFont, setIsDyslexicFont] = useState(false);
-  const [isBionic, setIsBionic] = useState(false);
-  const [isDarkMode, setIsDarkMode] = useState(true);
+  const [isBionic, setIsBionic] = useState(true);
+  const [isDarkMode, setIsDarkMode] = useState(false);
   const [fileName, setFileName] = useState("Sample_Presentation.pptx");
+
+  // Mockup reading interactions
+  const [activeCard, setActiveCard] = useState(0);
+  const [wpm, setWpm] = useState(170);
+  const [playing, setPlaying] = useState(false);
+  const [wordIdx, setWordIdx] = useState(-1);
+  const [cardsRead, setCardsRead] = useState(() => new Set([0]));
+  const [flowStep, setFlowStep] = useState(0);
+  const [flowPlaying, setFlowPlaying] = useState(false);
+  const [flashIdx, setFlashIdx] = useState(0);
+  const [flashFlipped, setFlashFlipped] = useState(false);
+
+  const playTimerRef = useRef(null);
+  const flowTimerRef = useRef(null);
 
   // Screen Reader Accessibility Announcement State
   const [announcement, setAnnouncement] = useState("Document loaded successfully.");
 
   const pageCount = Object.keys(pages).length;
   const currentPageData = pages[currentPage] || pages[1];
+  const cards = currentPageData.cards || [];
+  const activeText = cards[activeCard] || cards[0] || '';
+  const stageWords = useMemo(() => activeText.split(/\s+/).filter(Boolean), [activeText]);
+  const totalSec = Math.max(1, Math.round(stageWords.length * 0.4));
+  const flashcards = useMemo(() => buildFlashcards(currentPageData), [currentPageData]);
+  const flowNodes = currentPageData.flowchart || [];
+
+  // Sync mockup-style theme attributes on <html>
+  useEffect(() => {
+    document.documentElement.setAttribute('data-contrast', isDarkMode ? 'high' : 'low');
+  }, [isDarkMode]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-dyslexic', isDyslexicFont ? 'on' : 'off');
+  }, [isDyslexicFont]);
+
+  // Reset reading UI when page changes
+  useEffect(() => {
+    setActiveCard(0);
+    setWordIdx(-1);
+    setPlaying(false);
+    setCardsRead(new Set([0]));
+    setFlowStep(0);
+    setFlowPlaying(false);
+    setFlashIdx(0);
+    setFlashFlipped(false);
+  }, [currentPage, pages]);
+
+  // Word-by-word playback
+  useEffect(() => {
+    if (!playing) {
+      clearInterval(playTimerRef.current);
+      return;
+    }
+    const intervalMs = Math.max(120, 60000 / wpm);
+    playTimerRef.current = setInterval(() => {
+      setWordIdx((prev) => {
+        const next = prev + 1;
+        if (next >= stageWords.length) {
+          setPlaying(false);
+          return prev;
+        }
+        return next;
+      });
+    }, intervalMs);
+    return () => clearInterval(playTimerRef.current);
+  }, [playing, wpm, stageWords.length]);
+
+  // Concept flow autoplay
+  useEffect(() => {
+    if (!flowPlaying) {
+      clearInterval(flowTimerRef.current);
+      return;
+    }
+    flowTimerRef.current = setInterval(() => {
+      setFlowStep((prev) => (prev + 1) % Math.max(flowNodes.length, 1));
+    }, 1400);
+    return () => clearInterval(flowTimerRef.current);
+  }, [flowPlaying, flowNodes.length]);
 
   // Helper for screen reader notifications
   const announce = (msg) => setAnnouncement(msg);
+
+  const selectCard = (idx) => {
+    setActiveCard(idx);
+    setWordIdx(-1);
+    setPlaying(false);
+    setCardsRead((prev) => new Set([...prev, idx]));
+    announce(`Opened card ${idx + 1}`);
+  };
+
+  const togglePlay = () => {
+    if (playing) {
+      setPlaying(false);
+      return;
+    }
+    if (wordIdx >= stageWords.length - 1) {
+      setWordIdx(-1);
+    }
+    setPlaying(true);
+    announce('Playing synced reading');
+  };
+
+  const toggleFlowPlay = () => {
+    if (flowPlaying) {
+      setFlowPlaying(false);
+      announce('Paused concept flowchart');
+      return;
+    }
+    setFlowStep(0);
+    setFlowPlaying(true);
+    announce('Playing concept flowchart');
+  };
 
   const createMicroCards = (rawText) => {
     const paragraphs = rawText
@@ -248,14 +378,14 @@ export default function App() {
   };
 
   const processTextForPage = async (pageText, pageNum, docName) => {
-    const cards = createMicroCards(pageText);
+    const pageCards = createMicroCards(pageText);
 
     if (useAI && apiKey.trim().length > 0) {
       try {
         const aiResult = await fetchOpenAIAnalysis(pageText, apiKey);
         return {
           title: `Slide ${pageNum}: ${docName}`,
-          cards,
+          cards: pageCards,
           flowchart: aiResult.flowchart || extractSmartFlowchart(pageText),
           summary: aiResult.summary || extractSmartSummary(pageText),
           eli5: aiResult.eli5 || synthesizeELI5(pageText),
@@ -268,7 +398,7 @@ export default function App() {
 
     return {
       title: `Slide ${pageNum}: ${docName}`,
-      cards,
+      cards: pageCards,
       flowchart: extractSmartFlowchart(pageText),
       summary: extractSmartSummary(pageText),
       eli5: synthesizeELI5(pageText),
@@ -342,10 +472,40 @@ export default function App() {
     announce(`Navigated to page ${newPage} of ${pageCount}`);
   };
 
+  const scrubPct = wordIdx < 0 ? 0 : ((wordIdx + 1) / Math.max(stageWords.length, 1)) * 100;
+  const elapsedSec = wordIdx < 0 ? 0 : Math.round(((wordIdx + 1) / Math.max(stageWords.length, 1)) * totalSec);
+  const rereadMins = Math.max(1, Math.round(cardsRead.size * 2.5));
+  const focusPct = cards.length ? Math.round((cardsRead.size / cards.length) * 100) : 0;
+
+  const Switch = ({ on, onToggle, label, id }) => (
+    <div className="flex items-center gap-1.5 font-display text-[12.5px] font-medium text-[var(--muted)]">
+      <span className="hidden md:inline">{label}</span>
+      <button
+        id={id}
+        type="button"
+        role="switch"
+        aria-checked={on}
+        aria-label={label}
+        onClick={onToggle}
+        className={`relative w-[34px] h-[19px] rounded-full border shrink-0 transition-colors duration-[320ms] ${
+          on
+            ? 'bg-[var(--teal-soft)] border-[var(--teal)]'
+            : 'bg-[var(--surface-2)] border-[var(--border)]'
+        }`}
+      >
+        <span
+          className={`absolute top-[2px] left-[2px] w-[13px] h-[13px] rounded-full transition-all duration-[320ms] ${
+            on
+              ? 'translate-x-[15px] bg-[var(--teal)]'
+              : 'translate-x-0 bg-[var(--muted)]'
+          }`}
+        />
+      </button>
+    </div>
+  );
+
   return (
-    <div className={`min-h-screen transition-colors duration-300 font-sans selection:bg-indigo-500 selection:text-white ${
-      isDarkMode ? 'bg-[#0B0F19] text-slate-100' : 'bg-[#F8FAFC] text-slate-900'
-    }`}>
+    <div className="min-h-screen bg-[var(--bg)] text-[var(--ink)] font-body transition-colors duration-[320ms] selection:bg-[var(--teal-soft)] selection:text-[var(--teal)]">
       
       {/* 🔊 WCAG 2.1 Screen Reader Live Region */}
       <div aria-live="polite" aria-atomic="true" className="sr-only">
@@ -355,421 +515,594 @@ export default function App() {
       {/* ⌨️ WCAG 2.4.1 Skip Link for Keyboard Users */}
       <a 
         href="#main-content" 
-        className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:p-3 focus:bg-indigo-700 focus:text-white focus:rounded-xl focus:shadow-lg"
+        className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:px-3 focus:py-2 focus:bg-[var(--teal)] focus:text-white focus:rounded-nf-sm focus:shadow-nf"
       >
         Skip to main content
       </a>
 
-      {/* Background Ambience */}
-      <div className="fixed top-0 left-1/4 w-96 h-96 bg-indigo-600/10 rounded-full blur-[120px] pointer-events-none" />
-      <div className="fixed top-1/3 right-1/4 w-96 h-96 bg-teal-500/10 rounded-full blur-[120px] pointer-events-none" />
+      {/* App shell */}
+      <div className="grid min-h-screen grid-cols-1 lg:grid-cols-[236px_1fr_300px] grid-rows-[60px_1fr] [grid-template-areas:'top''main''side''aside'] lg:[grid-template-areas:'top_top_top''side_main_aside']">
 
-      {/* Header */}
-      <header className={`border-b sticky top-0 z-30 backdrop-blur-xl transition-colors ${
-        isDarkMode ? 'border-slate-800/80 bg-[#0B0F19]/80' : 'border-slate-200 bg-white/90 shadow-sm'
-      }`} role="banner">
-        <div className="max-w-7xl mx-auto px-6 py-3.5 flex flex-wrap items-center justify-between gap-4">
-          
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-teal-400 p-[1px] shadow-lg shadow-indigo-500/20">
-              <div className="w-full h-full bg-slate-950 rounded-[11px] flex items-center justify-center text-lg" aria-hidden="true">
-                ⚡
-              </div>
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className={`text-base font-extrabold tracking-tight ${
-                  isDarkMode ? 'text-slate-100' : 'text-slate-900'
-                }`}>
-                  NeuroFlex Engine
-                </h1>
-                {/* Contrast boost in light mode: text-indigo-700 (7.1:1 ratio) */}
-                <span className={`text-[10px] font-bold tracking-wider uppercase px-2 py-0.5 rounded-full border ${
-                  isDarkMode 
-                    ? 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20' 
-                    : 'bg-indigo-50 text-indigo-800 border-indigo-300'
-                }`}>
-                  v3.2 Canvas
-                </span>
-              </div>
-              <p className={`text-xs ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>
-                Semantic Document & Flowchart Visualizer
-              </p>
-            </div>
+        {/* TOP BAR */}
+        <header
+          className="[grid-area:top] flex items-center gap-3 sm:gap-4 px-3 sm:px-5 border-b border-[var(--border)] bg-[var(--surface)] z-30 sticky top-0"
+          role="banner"
+        >
+          <div className="flex items-center gap-2 font-display font-bold text-[16px] tracking-tight shrink-0">
+            <span
+              className="w-[22px] h-[22px] rounded-[6px] bg-gradient-to-br from-[var(--teal)] to-[var(--gold)] inline-flex shrink-0"
+              aria-hidden="true"
+            />
+            NeuroFlex
           </div>
 
-          {/* Controls & Engine Toggles */}
-          <div className="flex items-center gap-3">
-            <div className={`flex items-center gap-2 p-1.5 rounded-xl border text-xs ${
-              isDarkMode ? 'bg-slate-900/80 border-slate-800' : 'bg-slate-100 border-slate-300'
-            }`}>
-              <button 
+          <div className="hidden sm:flex items-center gap-1.5 font-mono text-[12px] text-[var(--muted)] bg-[var(--surface-2)] border border-[var(--border)] px-2.5 py-1 rounded-full max-w-[220px] truncate">
+            <span className="w-1.5 h-1.5 rounded-full bg-[var(--teal)] shrink-0" aria-hidden="true" />
+            <span className="truncate">{fileName}</span>
+          </div>
+
+          <div className="flex-1" />
+
+          <div className="flex items-center gap-2 sm:gap-3 flex-wrap justify-end" role="group" aria-label="Accessibility options">
+            <Switch
+              id="sw-bionic"
+              label="Bionic reading"
+              on={isBionic}
+              onToggle={() => {
+                setIsBionic(!isBionic);
+                announce(`Bionic Reading mode ${!isBionic ? 'enabled' : 'disabled'}`);
+              }}
+            />
+            <Switch
+              id="sw-dyslexic"
+              label="OpenDyslexic"
+              on={isDyslexicFont}
+              onToggle={() => {
+                setIsDyslexicFont(!isDyslexicFont);
+                announce(`Dyslexia font ${!isDyslexicFont ? 'enabled' : 'disabled'}`);
+              }}
+            />
+            <Switch
+              id="sw-contrast"
+              label="High contrast"
+              on={isDarkMode}
+              onToggle={() => {
+                setIsDarkMode(!isDarkMode);
+                announce(`Switched to ${!isDarkMode ? 'high contrast' : 'calm'} theme`);
+              }}
+            />
+          </div>
+        </header>
+
+        {/* LEFT SIDEBAR */}
+        <aside className="[grid-area:side] border-r-0 lg:border-r border-t lg:border-t-0 border-[var(--border)] bg-[var(--surface)] px-4 py-5 flex flex-col gap-6 overflow-y-auto">
+          <div>
+            <div className="font-display font-semibold text-[11px] uppercase tracking-[0.08em] text-[var(--muted)] mb-2.5">
+              Document
+            </div>
+            <label className="block cursor-pointer">
+              <div className="border-[1.5px] border-dashed border-[var(--border)] rounded-nf-sm px-3 py-4 text-center text-[12.5px] text-[var(--muted)] bg-[var(--surface-2)] hover:border-[var(--teal)] transition-colors">
+                <strong className="block text-[var(--ink)] text-[13px] mb-0.5 truncate">
+                  {isLoading ? 'Extracting…' : fileName}
+                </strong>
+                Parsed locally · {pageCount} page{pageCount === 1 ? '' : 's'}
+              </div>
+              <input
+                type="file"
+                accept=".pdf,.pptx"
+                className="hidden"
+                onChange={handleFileUpload}
+                disabled={isLoading}
+              />
+            </label>
+          </div>
+
+          <div>
+            <div className="font-display font-semibold text-[11px] uppercase tracking-[0.08em] text-[var(--muted)] mb-2.5">
+              Engine mode
+            </div>
+            <div className="flex flex-col gap-2">
+              <button
+                type="button"
                 onClick={() => {
-                  setUseAI(!useAI);
-                  announce(`Switched engine to ${!useAI ? 'OpenAI' : 'Local NLP'}`);
+                  if (useAI) {
+                    setUseAI(false);
+                    announce('Switched engine to Local NLP');
+                  }
+                }}
+                aria-pressed={!useAI}
+                className={`flex items-start gap-2 border rounded-nf-sm px-2.5 py-2 text-left text-[12.5px] transition-colors ${
+                  !useAI
+                    ? 'border-[var(--teal)] bg-[var(--teal-soft)]'
+                    : 'border-[var(--border)] bg-transparent hover:border-[var(--teal)]'
+                }`}
+              >
+                <span className="mt-0.5 w-3 h-3 rounded-full border border-[var(--border)] shrink-0 flex items-center justify-center">
+                  {!useAI && <span className="w-1.5 h-1.5 rounded-full bg-[var(--teal)]" />}
+                </span>
+                <span>
+                  <span className="font-bold block text-[var(--ink)]">Local fallback</span>
+                  <span className="text-[var(--muted)] text-[11.5px]">Runs offline in your browser. Nothing leaves your device.</span>
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!useAI) {
+                    setUseAI(true);
+                    announce('Switched engine to OpenAI');
+                  }
                 }}
                 aria-pressed={useAI}
-                className={`px-2.5 py-1 rounded-lg font-bold transition focus-visible:ring-2 ${
-                  useAI 
-                    ? 'bg-indigo-700 text-white' 
-                    : isDarkMode 
-                      ? 'text-slate-300 hover:text-slate-100' 
-                      : 'text-slate-800 hover:text-slate-950'
+                className={`flex items-start gap-2 border rounded-nf-sm px-2.5 py-2 text-left text-[12.5px] transition-colors ${
+                  useAI
+                    ? 'border-[var(--teal)] bg-[var(--teal-soft)]'
+                    : 'border-[var(--border)] bg-transparent hover:border-[var(--teal)]'
                 }`}
               >
-                {useAI ? "🤖 OpenAI Engine" : "⚡ Local Engine"}
-              </button>
-
-              {useAI && (
-                <input 
-                  type="password" 
-                  aria-label="OpenAI API Key"
-                  placeholder="Paste OpenAI Key..." 
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  className={`border px-2 py-1 rounded-lg text-xs focus:outline-none focus:border-indigo-600 w-36 ${
-                    isDarkMode ? 'bg-slate-950 border-slate-800 text-slate-200' : 'bg-white border-slate-300 text-slate-900'
-                  }`}
-                />
-              )}
-            </div>
-
-            <label className="cursor-pointer group relative">
-              <div className="absolute -inset-0.5 bg-gradient-to-r from-indigo-500 to-teal-400 rounded-xl blur opacity-30 group-hover:opacity-75 transition duration-300"></div>
-              <div className={`relative px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 border transition ${
-                isDarkMode ? 'bg-slate-900 border-slate-700 text-slate-200' : 'bg-white border-slate-300 text-slate-900'
-              }`}>
-                <span>{isLoading ? "⏳ Extracting..." : `📄 ${fileName}`}</span>
-                <input 
-                  type="file" 
-                  accept=".pdf,.pptx" 
-                  className="hidden" 
-                  onChange={handleFileUpload} 
-                  disabled={isLoading}
-                />
-              </div>
-            </label>
-
-            <div className="h-4 w-[1px] bg-slate-700/40 hidden sm:block" />
-
-            {/* Accessibility Controls */}
-            <div className={`flex items-center gap-1.5 p-1 rounded-xl border text-xs font-medium ${
-              isDarkMode ? 'bg-slate-900/60 border-slate-800' : 'bg-white border-slate-300 shadow-sm'
-            }`} role="group" aria-label="Accessibility options">
-              <button 
-                onClick={() => {
-                  setIsDyslexicFont(!isDyslexicFont);
-                  announce(`Dyslexia font ${!isDyslexicFont ? 'enabled' : 'disabled'}`);
-                }}
-                aria-pressed={isDyslexicFont}
-                className={`px-3 py-1.5 rounded-lg transition focus-visible:ring-2 ${
-                  isDyslexicFont 
-                    ? 'bg-indigo-700 text-white shadow-md' 
-                    : isDarkMode 
-                      ? 'text-slate-300 hover:text-white' 
-                      : 'text-slate-700 hover:text-black font-semibold'
-                }`}
-              >
-                OpenDyslexic
-              </button>
-
-              <button 
-                onClick={() => {
-                  setIsBionic(!isBionic);
-                  announce(`Bionic Reading mode ${!isBionic ? 'enabled' : 'disabled'}`);
-                }}
-                aria-pressed={isBionic}
-                className={`px-3 py-1.5 rounded-lg transition focus-visible:ring-2 ${
-                  isBionic 
-                    ? 'bg-teal-700 text-white shadow-md font-bold' 
-                    : isDarkMode 
-                      ? 'text-slate-300 hover:text-white' 
-                      : 'text-slate-700 hover:text-black font-semibold'
-                }`}
-              >
-                Bionic
-              </button>
-
-              <button 
-                onClick={() => {
-                  setIsDarkMode(!isDarkMode);
-                  announce(`Switched to ${!isDarkMode ? 'Dark' : 'Light'} theme`);
-                }}
-                aria-label={`Switch to ${isDarkMode ? 'Light' : 'Dark'} theme`}
-                className="px-2.5 py-1.5 rounded-lg text-slate-400 hover:text-slate-200 transition focus-visible:ring-2"
-              >
-                {isDarkMode ? '☀️' : '🌙'}
+                <span className="mt-0.5 w-3 h-3 rounded-full border border-[var(--border)] shrink-0 flex items-center justify-center">
+                  {useAI && <span className="w-1.5 h-1.5 rounded-full bg-[var(--teal)]" />}
+                </span>
+                <span>
+                  <span className="font-bold block text-[var(--ink)]">Semantic AI</span>
+                  <span className="text-[var(--muted)] text-[11.5px]">Deeper summaries when you're online.</span>
+                </span>
               </button>
             </div>
-          </div>
-        </div>
-      </header>
-
-      {/* Main Container */}
-      <main id="main-content" className="max-w-7xl mx-auto px-6 py-8 space-y-6 relative z-10">
-        
-        {/* 📊 GRAPHICAL FLOWCHART DRAWER */}
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <button 
-                onClick={() => {
-                  setShowFlowchart(!showFlowchart);
-                  announce(`Flowchart diagram ${!showFlowchart ? 'expanded' : 'collapsed'}`);
-                }}
-                aria-expanded={showFlowchart}
-                className={`px-5 py-2.5 rounded-2xl font-extrabold text-xs tracking-wider uppercase flex items-center gap-3 transition-all duration-300 shadow-lg focus-visible:ring-2 ${
-                  showFlowchart 
-                    ? 'bg-gradient-to-r from-indigo-700 to-teal-600 text-white shadow-indigo-500/25' 
-                    : isDarkMode 
-                      ? 'bg-slate-900 hover:bg-slate-800 border border-slate-800 text-indigo-400' 
-                      : 'bg-white hover:bg-slate-100 border border-slate-300 text-indigo-800'
-                }`}
-              >
-                <span className="text-sm" aria-hidden="true">{showFlowchart ? '🔽' : '📊'}</span>
-                <span>{showFlowchart ? "Hide Visual Concept Diagram" : "View Visual Concept Diagram"}</span>
-              </button>
-
-              {showFlowchart && (
-                <button
-                  onClick={() => setIsFlowchartFullscreen(true)}
-                  className={`px-4 py-2.5 rounded-2xl font-bold text-xs flex items-center gap-2 border transition focus-visible:ring-2 ${
-                    isDarkMode 
-                      ? 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800' 
-                      : 'bg-white border-slate-300 text-slate-800 hover:bg-slate-100'
-                  }`}
-                >
-                  <span aria-hidden="true">⛶</span>
-                  <span>Expand Fullscreen</span>
-                </button>
-              )}
-            </div>
-
-            {showFlowchart && (
-              <span className={`text-xs font-semibold flex items-center gap-2 ${
-                isDarkMode ? 'text-slate-400' : 'text-slate-700'
-              }`}>
-                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" aria-hidden="true" />
-                Interactive Concept Flowchart
-              </span>
+            {useAI && (
+              <input
+                type="password"
+                aria-label="OpenAI API Key"
+                placeholder="Paste OpenAI key…"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                className="mt-2 w-full border border-[var(--border)] bg-[var(--surface-2)] text-[var(--ink)] placeholder:text-[var(--muted)] px-2.5 py-2 rounded-nf-sm text-[12px] focus:outline-none focus:border-[var(--teal)]"
+              />
             )}
           </div>
 
-          {/* Inline Flowchart Drawer */}
-          {showFlowchart && !isFlowchartFullscreen && (
-            <section 
-              aria-label="Interactive concept flowchart" 
-              className={`p-6 rounded-3xl border transition-all duration-300 relative overflow-hidden shadow-2xl h-[450px] ${
-                isDarkMode 
-                  ? 'bg-slate-900/80 border-slate-800/80 backdrop-blur-xl shadow-slate-950/50' 
-                  : 'bg-white border-slate-300 shadow-slate-200/80'
-              }`}
-            >
-              <Flowchart data={currentPageData.flowchart} />
-            </section>
-          )}
-        </div>
+          <div>
+            <div className="font-display font-semibold text-[11px] uppercase tracking-[0.08em] text-[var(--muted)] mb-0">
+              Reading speed
+            </div>
+            <label className="flex justify-between text-[12.5px] mt-2.5 mb-2">
+              <span>Words per minute</span>
+              <span className="font-mono text-[var(--teal)] font-medium">{wpm}</span>
+            </label>
+            <input
+              type="range"
+              min={90}
+              max={320}
+              value={wpm}
+              onChange={(e) => setWpm(Number(e.target.value))}
+              aria-label="Reading speed in words per minute"
+              className="w-full accent-[var(--teal)] h-1"
+            />
+          </div>
 
-        {/* 📚 READING CARDS & SIDEBAR */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-          
-          {/* Micro-Cards Reading Area */}
-          <section className="lg:col-span-7 space-y-6" aria-labelledby="cards-section-heading">
-            <h2 id="cards-section-heading" className="sr-only">Document Micro-Cards</h2>
-            
-            {/* Pagination Controls */}
-            <nav 
-              aria-label="Slide pagination" 
-              className={`p-4 rounded-2xl border flex items-center justify-between shadow-sm ${
-                isDarkMode ? 'bg-slate-900/60 border-slate-800' : 'bg-white border-slate-300'
-              }`}
-            >
-              <button 
-                onClick={() => handlePageChange(Math.max(currentPage - 1, 1))}
-                disabled={currentPage === 1}
-                aria-label="Previous Page"
-                className={`px-4 py-2 rounded-xl text-xs font-bold disabled:opacity-30 transition focus-visible:ring-2 ${
-                  isDarkMode 
-                    ? 'bg-slate-800 hover:bg-slate-700 text-slate-200' 
-                    : 'bg-slate-200 hover:bg-slate-300 text-slate-900'
-                }`}
-              >
-                ◄ Previous
-              </button>
-
-              <div className="text-center">
-                <span className={`text-xs font-bold uppercase tracking-wider block ${
-                  isDarkMode ? 'text-indigo-400' : 'text-indigo-800'
-                }`}>
-                  Slide Navigation
-                </span>
-                <span className={`text-sm font-extrabold ${isDarkMode ? 'text-slate-200' : 'text-slate-900'}`}>
-                  Page {currentPage} of {pageCount}
-                </span>
+          <div>
+            <div className="font-display font-semibold text-[11px] uppercase tracking-[0.08em] text-[var(--muted)] mb-2.5">
+              This session
+            </div>
+            <div className="mb-3">
+              <div className="flex justify-between font-mono text-[11.5px] text-[var(--muted)] mb-1.5">
+                <span>Cards read</span>
+                <span>{cardsRead.size} / {cards.length || 1}</span>
               </div>
+              <div className="h-[5px] rounded-full bg-[var(--surface-2)] overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-[var(--teal)]"
+                  style={{ width: `${cards.length ? (cardsRead.size / cards.length) * 100 : 0}%` }}
+                />
+              </div>
+            </div>
+            <div className="mb-3">
+              <div className="flex justify-between font-mono text-[11.5px] text-[var(--muted)] mb-1.5">
+                <span>Re-reads avoided</span>
+                <span>~{rereadMins} min</span>
+              </div>
+              <div className="h-[5px] rounded-full bg-[var(--surface-2)] overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-[var(--gold)]"
+                  style={{ width: `${Math.min(100, rereadMins * 8)}%` }}
+                />
+              </div>
+            </div>
+            <div>
+              <div className="flex justify-between font-mono text-[11.5px] text-[var(--muted)] mb-1.5">
+                <span>Focus lens uptime</span>
+                <span>{focusPct}%</span>
+              </div>
+              <div className="h-[5px] rounded-full bg-[var(--surface-2)] overflow-hidden">
+                <div className="h-full rounded-full bg-[var(--teal)]" style={{ width: `${focusPct}%` }} />
+              </div>
+            </div>
+          </div>
+        </aside>
 
-              <button 
-                onClick={() => handlePageChange(Math.min(currentPage + 1, pageCount))}
-                disabled={currentPage === pageCount}
-                aria-label="Next Page"
-                className={`px-4 py-2 rounded-xl text-xs font-bold disabled:opacity-30 transition focus-visible:ring-2 ${
-                  isDarkMode 
-                    ? 'bg-slate-800 hover:bg-slate-700 text-slate-200' 
-                    : 'bg-slate-200 hover:bg-slate-300 text-slate-900'
-                }`}
-              >
-                Next ►
-              </button>
-            </nav>
+        {/* MAIN */}
+        <main id="main-content" className="[grid-area:main] px-4 sm:px-7 py-5 sm:py-7 overflow-y-auto">
+          <div className="mb-5">
+            <div className="font-mono text-[11px] tracking-[0.06em] text-[var(--teal)] uppercase mb-1.5">
+              Reading canvas
+            </div>
+            <h1 className="font-display text-[22px] sm:text-[23px] font-bold tracking-tight m-0 mb-1.5">
+              {currentPageData.title}
+            </h1>
+            <p className="m-0 text-[var(--muted)] text-[13.5px] max-w-[56ch]">
+              Chunked into micro-cards{isBionic ? ' and bolded at the word stem' : ''}, so your eyes catch the shape of the sentence without re-reading it. Pick a card to open it and read along.
+            </p>
+          </div>
 
-            {/* Micro Cards */}
-            <div className="space-y-4" role="feed" aria-busy={isLoading}>
-              {currentPageData.cards.map((text, idx) => (
-                <article 
+          {/* Pagination */}
+          <nav
+            aria-label="Slide pagination"
+            className="mb-5 p-3 rounded-nf border border-[var(--border)] bg-[var(--surface)] flex items-center justify-between shadow-nf"
+          >
+            <button
+              onClick={() => handlePageChange(Math.max(currentPage - 1, 1))}
+              disabled={currentPage === 1}
+              aria-label="Previous Page"
+              className="px-3 py-1.5 rounded-nf-sm text-[12px] font-display font-semibold disabled:opacity-30 bg-[var(--surface-2)] text-[var(--ink)]"
+            >
+              ◄ Previous
+            </button>
+            <div className="text-center">
+              <span className="font-mono text-[11px] uppercase tracking-wider block text-[var(--teal)]">
+                Slide navigation
+              </span>
+              <span className="text-[13px] font-display font-semibold">
+                Page {currentPage} of {pageCount}
+              </span>
+            </div>
+            <button
+              onClick={() => handlePageChange(Math.min(currentPage + 1, pageCount))}
+              disabled={currentPage === pageCount}
+              aria-label="Next Page"
+              className="px-3 py-1.5 rounded-nf-sm text-[12px] font-display font-semibold disabled:opacity-30 bg-[var(--surface-2)] text-[var(--ink)]"
+            >
+              Next ►
+            </button>
+          </nav>
+
+          {/* Focus-lens micro-card grid */}
+          <div
+            className="grid gap-3 mb-6"
+            style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))' }}
+            role="list"
+            aria-label="Micro-cards"
+            aria-busy={isLoading}
+          >
+            {cards.map((text, idx) => {
+              const isActive = idx === activeCard;
+              return (
+                <button
                   key={idx}
-                  tabIndex={0}
-                  aria-label={`Block ${idx + 1} of ${currentPageData.cards.length}`}
-                  className={`p-6 rounded-2xl border transition-all duration-300 focus:outline-none focus-visible:ring-4 ${
-                    isDarkMode 
-                      ? 'bg-slate-900/40 border-slate-800 text-slate-200 focus-visible:ring-indigo-400' 
-                      : 'bg-white border-slate-300 text-slate-900 shadow-sm focus-visible:ring-indigo-600'
-                  } ${isDyslexicFont ? 'font-mono tracking-wide leading-loose' : 'font-sans'}`}
+                  type="button"
+                  role="listitem"
+                  onClick={() => selectCard(idx)}
+                  className={`text-left p-3.5 rounded-nf border bg-[var(--surface)] transition-all duration-[320ms] cursor-pointer ${
+                    isActive
+                      ? 'opacity-100 border-[var(--teal)] shadow-nf'
+                      : 'opacity-55 border-[var(--border)] hover:border-[var(--teal)]'
+                  } ${isDyslexicFont ? 'font-dyslexic' : ''}`}
                 >
-                  <div className={`flex items-center justify-between text-[11px] font-bold mb-3 uppercase tracking-wider ${
-                    isDarkMode ? 'text-indigo-400' : 'text-indigo-800'
-                  }`}>
-                    <span className="flex items-center gap-1.5">
-                      <span className="w-1.5 h-1.5 rounded-full bg-indigo-600" aria-hidden="true" />
-                      Block {idx + 1} of {currentPageData.cards.length}
+                  <div className="font-mono text-[10.5px] text-[var(--muted)] flex items-center gap-1.5 mb-2">
+                    <span
+                      className={`w-4 h-4 rounded-[4px] inline-flex items-center justify-center text-[9px] ${
+                        isActive
+                          ? 'bg-[var(--teal)] text-white'
+                          : 'bg-[var(--surface-2)] text-[var(--ink)]'
+                      }`}
+                    >
+                      {idx + 1}
                     </span>
-                    <span className={isDarkMode ? 'text-slate-400' : 'text-slate-600'}>Readable Chunk</span>
+                    {cardShortTitle(text, idx)}
                   </div>
-
-                  <p className="text-base sm:text-lg leading-relaxed font-normal">
-                    {isBionic ? (
-                      renderBionicText(text, isDarkMode)
-                    ) : (
-                      text
-                    )}
+                  <p className="m-0 text-[14px] leading-snug line-clamp-3">
+                    {isBionic ? renderBionicText(text) : text}
                   </p>
-                </article>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Reading stage */}
+          <div className="bg-[var(--surface)] border border-[var(--border)] rounded-nf shadow-nf px-4 sm:px-6 pt-5 sm:pt-6 pb-4">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2 font-display font-semibold text-[14px]">
+                Card {activeCard + 1}
+                <span className="bg-[var(--gold-soft)] text-[var(--gold)] rounded-full px-2.5 py-0.5 text-[10.5px] font-mono font-medium">
+                  {isBionic ? 'Bionic · synced audio' : 'Synced audio'}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsFlowchartFullscreen(true)}
+                className="font-mono text-[11px] text-[var(--teal)] border border-[var(--teal)] rounded-full px-2.5 py-0.5 hover:bg-[var(--teal-soft)]"
+              >
+                Diagram
+              </button>
+            </div>
+
+            <p
+              className={`m-0 text-[18px] sm:text-[22px] leading-[1.85] tracking-wide max-w-[72ch] ${
+                isDyslexicFont ? 'font-dyslexic' : ''
+              }`}
+            >
+              {stageWords.map((word, i) => {
+                const { bold, rest } = splitBionic(word);
+                const active = i === wordIdx;
+                return (
+                  <span
+                    key={`${activeCard}-${i}`}
+                    className={`inline px-0.5 rounded transition-colors duration-[320ms] ${
+                      active
+                        ? 'bg-[var(--gold-soft)] text-[var(--gold)] shadow-[inset_0_0_0_1px_var(--gold)]'
+                        : ''
+                    }`}
+                  >
+                    {isBionic && bold ? (
+                      <>
+                        <strong className="font-bold">{bold}</strong>
+                        <span className={active ? '' : 'text-[var(--muted)]'}>{rest}</span>
+                      </>
+                    ) : (
+                      word
+                    )}{' '}
+                  </span>
+                );
+              })}
+            </p>
+
+            <div className="flex items-center gap-2 mt-3.5 pt-3.5 border-t border-[var(--border)] text-[12px] text-[var(--muted)]">
+              <span aria-hidden="true">◐</span>
+              Focus lens dims the cards you're not reading, so only this one pulls your eye.
+            </div>
+
+            <div className="flex items-center gap-2.5 mt-3.5">
+              <button
+                type="button"
+                onClick={togglePlay}
+                aria-label={playing ? 'Pause audio sync' : 'Play audio sync'}
+                className="w-[34px] h-[34px] rounded-full border-0 bg-[var(--teal)] text-white flex items-center justify-center shadow-[0_4px_10px_-4px_rgba(43,110,107,0.6)] text-[12px]"
+              >
+                {playing ? '❚❚' : '▶'}
+              </button>
+              <div className="flex-1 h-1 rounded-full bg-[var(--surface-2)] relative overflow-hidden">
+                <div
+                  className="absolute left-0 top-0 h-full bg-[var(--teal)] rounded-full transition-[width] duration-100 linear"
+                  style={{ width: `${scrubPct}%` }}
+                />
+              </div>
+              <div className="font-mono text-[11px] text-[var(--muted)] w-16 text-right tabular-nums">
+                0:{String(elapsedSec).padStart(2, '0')} / 0:{String(totalSec).padStart(2, '0')}
+              </div>
+            </div>
+          </div>
+
+          {/* Takeaways */}
+          <div className="mt-6 rounded-nf bg-[var(--teal-soft)] px-5 py-4">
+            <h3 className="m-0 mb-2 font-display text-[12px] uppercase tracking-[0.06em] text-[var(--teal)]">
+              Executive takeaways
+            </h3>
+            <ul className="m-0 pl-[18px] text-[13px] text-[var(--ink)] leading-[1.7]">
+              {currentPageData.summary.map((point, i) => (
+                <li key={i}>{point}</li>
               ))}
-            </div>
-          </section>
+            </ul>
+          </div>
 
-          {/* AI Insights Sidebar */}
-          <aside className="lg:col-span-5 space-y-5" aria-label="Slide Summary Insights">
-            
-            {/* Takeaways */}
-            <div className={`p-6 rounded-2xl border shadow-sm ${
-              isDarkMode ? 'bg-slate-900/60 border-slate-800' : 'bg-white border-slate-300'
-            }`}>
-              <div className={`flex items-center gap-2 mb-4 font-bold ${
-                isDarkMode ? 'text-indigo-400' : 'text-indigo-800'
-              }`}>
-                <span aria-hidden="true">📌</span>
-                <h3 className="text-xs uppercase tracking-wider">Executive Takeaways</h3>
-              </div>
-              <ul className="space-y-3 text-xs leading-relaxed">
-                {currentPageData.summary.map((point, i) => (
-                  <li key={i} className="flex items-start gap-2">
-                    <span className="text-indigo-600 mt-0.5" aria-hidden="true">•</span>
-                    <span className={isDarkMode ? 'text-slate-300' : 'text-slate-900 font-medium'}>
-                      {point}
-                    </span>
-                  </li>
-                ))}
-              </ul>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            <div className="border border-[var(--border)] rounded-nf bg-[var(--surface)] p-4">
+              <h3 className="m-0 mb-2 font-display text-[12px] uppercase tracking-[0.06em] text-[var(--teal)]">
+                Simple context (ELI5)
+              </h3>
+              <p className="m-0 text-[12.5px] leading-relaxed text-[var(--muted)]">{currentPageData.eli5}</p>
             </div>
-
-            {/* ELI5 */}
-            <div className={`p-6 rounded-2xl border shadow-sm ${
-              isDarkMode ? 'bg-slate-900/60 border-slate-800' : 'bg-white border-slate-300'
-            }`}>
-              <div className={`flex items-center gap-2 mb-3 font-bold ${
-                isDarkMode ? 'text-teal-400' : 'text-teal-800'
-              }`}>
-                <span aria-hidden="true">💡</span>
-                <h3 className="text-xs uppercase tracking-wider">Simple Context (ELI5)</h3>
-              </div>
-              <p className={`text-xs leading-relaxed ${
-                isDarkMode ? 'text-slate-300' : 'text-slate-900 font-medium'
-              }`}>
-                {currentPageData.eli5}
-              </p>
-            </div>
-
-            {/* Key Terms */}
-            <div className={`p-6 rounded-2xl border shadow-sm ${
-              isDarkMode ? 'bg-slate-900/60 border-slate-800' : 'bg-white border-slate-300'
-            }`}>
-              <h3 className={`text-[11px] font-bold uppercase tracking-wider mb-3 ${
-                isDarkMode ? 'text-slate-400' : 'text-slate-700'
-              }`}>
-                🏷️ Extracted Key Terms
+            <div className="border border-[var(--border)] rounded-nf bg-[var(--surface)] p-4">
+              <h3 className="m-0 mb-2.5 font-display text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--muted)]">
+                Key terms
               </h3>
               <div className="flex flex-wrap gap-2">
                 {currentPageData.jargon.map((term, i) => (
-                  <span 
-                    key={i} 
-                    className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold border ${
-                      isDarkMode 
-                        ? 'bg-indigo-500/10 border-indigo-500/20 text-indigo-300' 
-                        : 'bg-indigo-100 border-indigo-300 text-indigo-950'
-                    }`}
+                  <span
+                    key={i}
+                    className="px-2.5 py-1 rounded-nf-sm text-[11px] font-mono font-medium border border-[var(--border)] bg-[var(--gold-soft)] text-[var(--gold)]"
                   >
                     {term}
                   </span>
                 ))}
               </div>
             </div>
+          </div>
+        </main>
 
-          </aside>
-
-        </div>
-      </main>
-
-      {/* 🚀 FULLSCREEN OVERLAY MODAL */}
-      {isFlowchartFullscreen && (
-        <div 
-          role="dialog"
-          aria-modal="true"
-          aria-label="Interactive Process Flow Workspace"
-          className="fixed inset-0 z-50 bg-[#0B0F19]/95 backdrop-blur-2xl p-6 flex flex-col justify-between animate-fadeIn"
+        {/* RIGHT ASIDE */}
+        <aside
+          className="[grid-area:aside] border-l-0 lg:border-l border-t lg:border-t-0 border-[var(--border)] bg-[var(--surface)] px-4 py-5 flex flex-col gap-6 overflow-y-auto"
+          aria-label="Concept tools"
         >
-          {/* Header */}
-          <div className="flex items-center justify-between pb-4 border-b border-slate-800/80">
-            <div className="flex items-center gap-3">
-              <span className="text-2xl" aria-hidden="true">📊</span>
-              <div>
-                <h2 className="text-lg font-extrabold text-slate-100">
-                  Interactive Process Flow Workspace
-                </h2>
-                <p className="text-xs text-slate-400">
-                  Page {currentPage} of {pageCount} • Powered by {useAI ? 'OpenAI Engine' : 'Local Engine'}
-                </p>
-              </div>
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="font-display text-[13px] font-semibold m-0">Concept flowchart</h2>
+              <button
+                type="button"
+                onClick={toggleFlowPlay}
+                className="font-mono text-[11px] text-[var(--teal)] border border-[var(--teal)] rounded-full px-2.5 py-0.5 hover:bg-[var(--teal-soft)] transition-colors"
+              >
+                {flowPlaying ? 'Pause' : 'Play'}
+              </button>
             </div>
-
-            <button 
-              onClick={() => {
-                setIsFlowchartFullscreen(false);
-                announce("Exited fullscreen flowchart view.");
-              }}
-              className="px-5 py-2.5 rounded-2xl bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-extrabold transition shadow-lg shadow-indigo-600/30 flex items-center gap-2 focus-visible:ring-2"
+            <div className="flex flex-col">
+              {flowNodes.map((node, i) => {
+                const isActive = i === flowStep;
+                return (
+                  <div key={node.id || i}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFlowPlaying(false);
+                        setFlowStep(i);
+                      }}
+                      className={`w-full text-left flex gap-2.5 px-3 py-2.5 rounded-nf-sm border mb-1 transition-all duration-[320ms] ${
+                        isActive
+                          ? 'border-[var(--teal)] bg-[var(--teal-soft)] shadow-nf'
+                          : 'border-[var(--border)] bg-[var(--surface-2)] hover:translate-x-0.5'
+                      }`}
+                    >
+                      <span
+                        className={`w-6 h-6 rounded-[7px] border flex items-center justify-center font-mono text-[11px] shrink-0 ${
+                          isActive
+                            ? 'bg-[var(--teal)] border-[var(--teal)] text-white'
+                            : 'bg-[var(--surface)] border-[var(--border)] text-[var(--muted)]'
+                        }`}
+                      >
+                        {node.step || `0${i + 1}`}
+                      </span>
+                      <span>
+                        <span className="font-display font-semibold text-[13px] block mb-0.5 text-[var(--ink)]">
+                          {node.title}
+                        </span>
+                        <span className="text-[11.5px] text-[var(--muted)] leading-snug block">
+                          {node.detail}
+                        </span>
+                      </span>
+                    </button>
+                    {i < flowNodes.length - 1 && (
+                      <div
+                        className={`w-[1.5px] h-4 ml-[23px] ${
+                          i < flowStep ? 'bg-[var(--teal)]' : 'bg-[var(--border)]'
+                        }`}
+                      />
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsFlowchartFullscreen(true)}
+              className="mt-3 w-full font-mono text-[11px] text-[var(--muted)] border border-[var(--border)] rounded-nf-sm py-2 hover:border-[var(--teal)] hover:text-[var(--teal)] transition-colors"
             >
-              <span aria-hidden="true">✕</span>
-              <span>Exit Fullscreen</span>
+              Open interactive diagram
             </button>
           </div>
 
-          {/* Fullscreen Canvas */}
-          <div className="flex-1 w-full my-4 rounded-3xl border border-slate-800/80 overflow-hidden bg-slate-950/60 shadow-2xl">
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="font-display text-[13px] font-semibold m-0">Sure-question flashcard</h2>
+              <span className="text-[11px] text-[var(--muted)]">
+                {flashcards.length ? flashIdx + 1 : 0} / {flashcards.length || 0}
+              </span>
+            </div>
+
+            {flashcards.length > 0 ? (
+              <>
+                <div className="[perspective:1000px]">
+                  <button
+                    type="button"
+                    onClick={() => setFlashFlipped((f) => !f)}
+                    className="relative w-full h-[150px] border-0 bg-transparent p-0 cursor-pointer text-left"
+                    style={{
+                      transformStyle: 'preserve-3d',
+                      transition: 'transform 480ms cubic-bezier(.2,.8,.2,1)',
+                      transform: flashFlipped ? 'rotateY(180deg)' : 'none',
+                    }}
+                    aria-label={flashFlipped ? 'Flip flashcard back' : 'Reveal flashcard answer'}
+                  >
+                    <div
+                      className="absolute inset-0 rounded-nf border border-[var(--border)] p-4 flex flex-col justify-between bg-[var(--surface)] shadow-nf"
+                      style={{ backfaceVisibility: 'hidden' }}
+                    >
+                      <div className="font-mono text-[10px] uppercase tracking-[0.06em] text-[var(--coral)]">
+                        Question
+                      </div>
+                      <div className="font-display font-semibold text-[14.5px] leading-snug text-[var(--ink)]">
+                        {flashcards[flashIdx].q}
+                      </div>
+                      <div className="text-[11px] text-[var(--muted)]">Tap to reveal</div>
+                    </div>
+                    <div
+                      className="absolute inset-0 rounded-nf border border-[var(--border)] p-4 flex flex-col justify-between bg-[var(--coral-soft)] shadow-nf"
+                      style={{ backfaceVisibility: 'hidden', transform: 'rotateY(180deg)' }}
+                    >
+                      <div className="font-mono text-[10px] uppercase tracking-[0.06em] text-[var(--coral)]">
+                        Answer
+                      </div>
+                      <div className="font-display font-semibold text-[14.5px] leading-snug text-[var(--ink)]">
+                        {flashcards[flashIdx].a}
+                      </div>
+                      <div className="text-[11px] text-[var(--muted)]">Tap to flip back</div>
+                    </div>
+                  </button>
+                </div>
+                <div className="flex gap-2 mt-3">
+                  <button
+                    type="button"
+                    disabled={flashIdx === 0}
+                    onClick={() => {
+                      setFlashIdx((i) => Math.max(0, i - 1));
+                      setFlashFlipped(false);
+                    }}
+                    className="flex-1 font-mono text-[11px] py-1.5 rounded-full border border-[var(--border)] text-[var(--muted)] disabled:opacity-30"
+                  >
+                    Prev
+                  </button>
+                  <button
+                    type="button"
+                    disabled={flashIdx >= flashcards.length - 1}
+                    onClick={() => {
+                      setFlashIdx((i) => Math.min(flashcards.length - 1, i + 1));
+                      setFlashFlipped(false);
+                    }}
+                    className="flex-1 font-mono text-[11px] py-1.5 rounded-full border border-[var(--teal)] text-[var(--teal)] disabled:opacity-30"
+                  >
+                    Next
+                  </button>
+                </div>
+              </>
+            ) : (
+              <p className="text-[12px] text-[var(--muted)] m-0">No flashcards for this slide yet.</p>
+            )}
+          </div>
+        </aside>
+      </div>
+
+      {/* FULLSCREEN OVERLAY */}
+      {isFlowchartFullscreen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Interactive Process Flow Workspace"
+          className="fixed inset-0 z-50 bg-[var(--bg)]/95 backdrop-blur-md p-4 sm:p-6 flex flex-col"
+        >
+          <div className="flex items-center justify-between pb-4 border-b border-[var(--border)]">
+            <div>
+              <h2 className="text-lg font-display font-bold text-[var(--ink)] m-0">
+                Interactive process flow
+              </h2>
+              <p className="text-xs text-[var(--muted)] m-0 mt-0.5">
+                Page {currentPage} of {pageCount} · {useAI ? 'Semantic AI' : 'Local fallback'}
+              </p>
+            </div>
+
+            <button
+              onClick={() => {
+                setIsFlowchartFullscreen(false);
+                announce('Exited fullscreen flowchart view.');
+              }}
+              className="px-4 py-2.5 rounded-nf-sm bg-[var(--teal)] hover:opacity-90 text-white text-xs font-display font-semibold transition shadow-nf flex items-center gap-2"
+            >
+              Exit fullscreen
+            </button>
+          </div>
+
+          <div className="flex-1 w-full my-4 rounded-nf border border-[var(--border)] overflow-hidden bg-[var(--surface)] shadow-nf">
             <Flowchart data={currentPageData.flowchart} />
           </div>
         </div>
       )}
-
     </div>
   );
 }
