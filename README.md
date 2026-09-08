@@ -3,10 +3,10 @@
 > **Accessible Document & Concept-Flowchart Visualizer**  
 > Built for cognitive accessibility, Bionic Reading, and low-latency document processing.
 
-![WCAG 2.1 AA](https://img.shields.io/badge/WCAG_2.1_AA-Compliant-emerald)
-![License](https://img.shields.io/badge/License-MIT-indigo)
-![React](https://img.shields.io/badge/React-18-blue)
-![Vite](https://img.shields.io/badge/Vite-5-purple)
+WCAG 2.1 AA
+License
+React
+Vite
 
 ---
 
@@ -36,6 +36,8 @@
 ## 🏁 Quick Start
 
 1. **Clone the repository:**
-   ```bash
+  ```bash
    git clone [https://github.com/YOUR_USERNAME/neuroflex-engine.git](https://github.com/YOUR_USERNAME/neuroflex-engine.git)
    cd neuroflex-engine
+  ```
+

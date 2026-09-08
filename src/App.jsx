@@ -268,7 +268,11 @@ export default function App() {
   const [flashFlipped, setFlashFlipped] = useState(false);
 
   const playTimerRef = useRef(null);
+  const fallbackTimeoutRef = useRef(null);
   const flowTimerRef = useRef(null);
+  const utteranceRef = useRef(null);
+  const boundarySeenRef = useRef(false);
+  const wordOffsetsRef = useRef([]);
 
   // Screen Reader Accessibility Announcement State
   const [announcement, setAnnouncement] = useState("Document loaded successfully.");
@@ -278,9 +282,132 @@ export default function App() {
   const cards = currentPageData.cards || [];
   const activeText = cards[activeCard] || cards[0] || '';
   const stageWords = useMemo(() => activeText.split(/\s+/).filter(Boolean), [activeText]);
-  const totalSec = Math.max(1, Math.round(stageWords.length * 0.4));
+  const totalSec = Math.max(1, Math.round((stageWords.length / Math.max(wpm, 1)) * 60));
   const flashcards = useMemo(() => buildFlashcards(currentPageData), [currentPageData]);
   const flowNodes = currentPageData.flowchart || [];
+
+  const stopAudio = () => {
+    clearInterval(playTimerRef.current);
+    playTimerRef.current = null;
+    clearTimeout(fallbackTimeoutRef.current);
+    fallbackTimeoutRef.current = null;
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    utteranceRef.current = null;
+    boundarySeenRef.current = false;
+  };
+
+  const buildWordOffsets = (text, words) => {
+    const offsets = [];
+    let cursor = 0;
+    words.forEach((word) => {
+      const idx = text.indexOf(word, cursor);
+      if (idx >= 0) {
+        offsets.push(idx);
+        cursor = idx + word.length;
+      } else {
+        offsets.push(cursor);
+        cursor += word.length + 1;
+      }
+    });
+    return offsets;
+  };
+
+  const wordIndexFromChar = (charIndex) => {
+    const offsets = wordOffsetsRef.current;
+    if (!offsets.length) return 0;
+    let wi = 0;
+    for (let i = 0; i < offsets.length; i++) {
+      if (offsets[i] <= charIndex) wi = i;
+      else break;
+    }
+    return wi;
+  };
+
+  const startFallbackHighlight = (fromIdx = -1) => {
+    clearInterval(playTimerRef.current);
+    let idx = fromIdx;
+    const intervalMs = Math.max(120, 60000 / wpm);
+    playTimerRef.current = setInterval(() => {
+      idx += 1;
+      if (idx >= stageWords.length) {
+        clearInterval(playTimerRef.current);
+        playTimerRef.current = null;
+        setPlaying(false);
+        return;
+      }
+      setWordIdx(idx);
+    }, intervalMs);
+  };
+
+  const startAudio = (fromWord = 0) => {
+    stopAudio();
+    const words = stageWords;
+    if (!words.length) {
+      setPlaying(false);
+      return;
+    }
+
+    const startAt = Math.max(0, Math.min(fromWord, words.length - 1));
+    const remainingWords = words.slice(startAt);
+    const textToSpeak = remainingWords.join(' ');
+    wordOffsetsRef.current = buildWordOffsets(textToSpeak, remainingWords);
+    setWordIdx(startAt);
+
+    if (typeof window === 'undefined' || !window.speechSynthesis) {
+      setAnnouncement('Speech not available — using visual sync only.');
+      startFallbackHighlight(startAt - 1);
+      return;
+    }
+
+    const utter = new SpeechSynthesisUtterance(textToSpeak);
+    utter.rate = Math.min(2, Math.max(0.6, wpm / 170));
+    utter.pitch = 1;
+    utter.volume = 1;
+    utteranceRef.current = utter;
+    boundarySeenRef.current = false;
+
+    utter.onboundary = (event) => {
+      if (event.name && event.name !== 'word') return;
+      boundarySeenRef.current = true;
+      clearInterval(playTimerRef.current);
+      playTimerRef.current = null;
+      const localIdx = wordIndexFromChar(event.charIndex);
+      setWordIdx(startAt + localIdx);
+    };
+
+    utter.onend = () => {
+      clearInterval(playTimerRef.current);
+      playTimerRef.current = null;
+      clearTimeout(fallbackTimeoutRef.current);
+      fallbackTimeoutRef.current = null;
+      setWordIdx(words.length - 1);
+      setPlaying(false);
+      utteranceRef.current = null;
+    };
+
+    utter.onerror = () => {
+      clearInterval(playTimerRef.current);
+      playTimerRef.current = null;
+      clearTimeout(fallbackTimeoutRef.current);
+      fallbackTimeoutRef.current = null;
+      setPlaying(false);
+      utteranceRef.current = null;
+    };
+
+    // Chrome can drop speak() if called immediately after cancel()
+    window.speechSynthesis.cancel();
+    fallbackTimeoutRef.current = setTimeout(() => {
+      window.speechSynthesis.speak(utter);
+      // If word boundaries never fire, keep highlight moving via WPM
+      fallbackTimeoutRef.current = setTimeout(() => {
+        if (!boundarySeenRef.current && utteranceRef.current === utter) {
+          startFallbackHighlight(startAt - 1);
+        }
+      }, 700);
+    }, 40);
+  };
 
   // Sync mockup-style theme attributes on <html>
   useEffect(() => {
@@ -293,6 +420,7 @@ export default function App() {
 
   // Reset reading UI when page changes
   useEffect(() => {
+    stopAudio();
     setActiveCard(0);
     setWordIdx(-1);
     setPlaying(false);
@@ -303,25 +431,8 @@ export default function App() {
     setFlashFlipped(false);
   }, [currentPage, pages]);
 
-  // Word-by-word playback
-  useEffect(() => {
-    if (!playing) {
-      clearInterval(playTimerRef.current);
-      return;
-    }
-    const intervalMs = Math.max(120, 60000 / wpm);
-    playTimerRef.current = setInterval(() => {
-      setWordIdx((prev) => {
-        const next = prev + 1;
-        if (next >= stageWords.length) {
-          setPlaying(false);
-          return prev;
-        }
-        return next;
-      });
-    }, intervalMs);
-    return () => clearInterval(playTimerRef.current);
-  }, [playing, wpm, stageWords.length]);
+  // Stop audio on unmount
+  useEffect(() => () => stopAudio(), []);
 
   // Concept flow autoplay
   useEffect(() => {
@@ -339,6 +450,7 @@ export default function App() {
   const announce = (msg) => setAnnouncement(msg);
 
   const selectCard = (idx) => {
+    stopAudio();
     setActiveCard(idx);
     setWordIdx(-1);
     setPlaying(false);
@@ -348,14 +460,18 @@ export default function App() {
 
   const togglePlay = () => {
     if (playing) {
+      stopAudio();
       setPlaying(false);
+      announce('Paused audio');
       return;
     }
-    if (wordIdx >= stageWords.length - 1) {
-      setWordIdx(-1);
-    }
+
+    const finished = wordIdx < 0 || wordIdx >= stageWords.length - 1;
+    const startFrom = finished ? 0 : wordIdx;
+    if (finished) setWordIdx(-1);
     setPlaying(true);
-    announce('Playing synced reading');
+    startAudio(startFrom);
+    announce('Playing synced audio');
   };
 
   const toggleFlowPlay = () => {
@@ -468,12 +584,21 @@ export default function App() {
   };
 
   const handlePageChange = (newPage) => {
+    stopAudio();
+    setPlaying(false);
     setCurrentPage(newPage);
     announce(`Navigated to page ${newPage} of ${pageCount}`);
   };
 
+  const formatTime = (sec) => {
+    const s = Math.max(0, Math.round(sec));
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m}:${String(r).padStart(2, '0')}`;
+  };
+
   const scrubPct = wordIdx < 0 ? 0 : ((wordIdx + 1) / Math.max(stageWords.length, 1)) * 100;
-  const elapsedSec = wordIdx < 0 ? 0 : Math.round(((wordIdx + 1) / Math.max(stageWords.length, 1)) * totalSec);
+  const elapsedSec = wordIdx < 0 ? 0 : ((wordIdx + 1) / Math.max(stageWords.length, 1)) * totalSec;
   const rereadMins = Math.max(1, Math.round(cardsRead.size * 2.5));
   const focusPct = cards.length ? Math.round((cardsRead.size / cards.length) * 100) : 0;
 
@@ -674,7 +799,14 @@ export default function App() {
               min={90}
               max={320}
               value={wpm}
-              onChange={(e) => setWpm(Number(e.target.value))}
+              onChange={(e) => {
+                const next = Number(e.target.value);
+                setWpm(next);
+                if (playing) {
+                  const resumeAt = Math.max(0, wordIdx);
+                  startAudio(resumeAt);
+                }
+              }}
               aria-label="Reading speed in words per minute"
               className="w-full accent-[var(--teal)] h-1"
             />
@@ -876,7 +1008,7 @@ export default function App() {
                 />
               </div>
               <div className="font-mono text-[11px] text-[var(--muted)] w-16 text-right tabular-nums">
-                0:{String(elapsedSec).padStart(2, '0')} / 0:{String(totalSec).padStart(2, '0')}
+                {formatTime(elapsedSec)} / {formatTime(totalSec)}
               </div>
             </div>
           </div>
